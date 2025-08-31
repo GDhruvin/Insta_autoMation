@@ -26,7 +26,7 @@ jobs:
 
       - name: Create Google credentials file
         run: |
-          echo "${{ secrets.GOOGLE_CREDENTIALS_JSON }}" > service_account.json
+          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > service_account.json
 
       - name: Run automation script
         env:
