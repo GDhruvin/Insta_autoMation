@@ -8,6 +8,7 @@ from googleapiclient.errors import HttpError
 from dotenv import load_dotenv
 import requests
 import logging
+import time  # Added for retry delays
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -69,12 +70,27 @@ def filter_rows(state: WorkflowState) -> WorkflowState:
         service = get_sheets_service()
         range_name = f"{SHEET_NAME}!A1:DZ"
         logger.info(f"Fetching rows from Google Sheet: {SPREADSHEET_ID}, range: {range_name}")
-        result = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID,
-            range=range_name,
-            valueRenderOption="FORMATTED_VALUE",
-            dateTimeRenderOption="FORMATTED_STRING"
-        ).execute()
+        
+        # Add retry logic for transient errors like 503
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                result = service.spreadsheets().values().get(
+                    spreadsheetId=SPREADSHEET_ID,
+                    range=range_name,
+                    valueRenderOption="FORMATTED_VALUE",
+                    dateTimeRenderOption="FORMATTED_STRING"
+                ).execute()
+                break
+            except HttpError as e:
+                if e.resp.status in [429, 500, 503]:  # Retry on rate limits, internal errors, service unavailable
+                    logger.warning(f"Retry attempt {attempt + 1}/{max_retries} after error: {str(e)}")
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                else:
+                    raise
+        else:
+            raise Exception("Max retries exceeded for Google Sheets API call")
+        
         values = result.get("values", [])
         
         # Filter rows where columns A and B are not empty
@@ -90,6 +106,10 @@ def filter_rows(state: WorkflowState) -> WorkflowState:
         logger.info(f"Filtered {len(filtered_rows)} rows from Google Sheets: {[row['row_number'] for row in filtered_rows]}")
         return state
     except HttpError as e:
+        state["error"] = f"Error filtering rows: {str(e)}"
+        logger.error(state["error"])
+        return state
+    except Exception as e:
         state["error"] = f"Error filtering rows: {str(e)}"
         logger.error(state["error"])
         return state
@@ -207,10 +227,25 @@ def clear_row(state: WorkflowState) -> WorkflowState:
         range_name = f"{SHEET_NAME}!A{row_number}:DZ{row_number}"
         logger.info(f"Clearing row {row_number} in Google Sheet: {range_name}")
         service = get_sheets_service()
-        service.spreadsheets().values().clear(
-            spreadsheetId=SPREADSHEET_ID,
-            range=range_name
-        ).execute()
+        
+        # Add retry logic for transient errors like 503
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                service.spreadsheets().values().clear(
+                    spreadsheetId=SPREADSHEET_ID,
+                    range=range_name
+                ).execute()
+                break
+            except HttpError as e:
+                if e.resp.status in [429, 500, 503]:
+                    logger.warning(f"Retry attempt {attempt + 1}/{max_retries} after error: {str(e)}")
+                    time.sleep(2 ** attempt)
+                else:
+                    raise
+        else:
+            raise Exception("Max retries exceeded for Google Sheets API call")
+        
         logger.info(f"Cleared row {row_number}")
         
         # Move to next row
@@ -221,6 +256,10 @@ def clear_row(state: WorkflowState) -> WorkflowState:
         logger.info(f"Moving to next row index: {state['current_row_index']}")
         return state
     except HttpError as e:
+        state["error"] = f"Error clearing row: {str(e)}"
+        logger.error(state["error"])
+        return state
+    except Exception as e:
         state["error"] = f"Error clearing row: {str(e)}"
         logger.error(state["error"])
         return state
@@ -235,8 +274,14 @@ def clear_row(state: WorkflowState) -> WorkflowState:
 def decide_next_step(state: WorkflowState) -> str:
     logger.info("Starting decide_next_step")
     if state["error"]:
-        logger.warning(f"Error detected: {state['error']}. Routing to clear_row")
-        return "clear_row"
+        logger.warning(f"Error detected: {state['error']}")
+        # Route to clear_row only if there are rows left to potentially clear/recover
+        if state["current_row_index"] < len(state["rows"]):
+            logger.info("Routing to clear_row to handle error")
+            return "clear_row"
+        else:
+            logger.info("No rows left, routing to END due to error")
+            return END
     if state["current_row_index"] >= len(state["rows"]):
         logger.info("No more rows to process, routing to END")
         return END
