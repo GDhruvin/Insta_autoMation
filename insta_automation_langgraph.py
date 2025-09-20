@@ -24,7 +24,7 @@ SHEET_NAME = os.getenv("SHEET_NAME")
 INSTAGRAM_ACCOUNT_ID = os.getenv("INSTAGRAM_ACCOUNT_ID")
 INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")
 
-# Validate that all required environment variables are set
+# Validate that all required environment variables are set.
 required_vars = [
     "GOOGLE_CREDENTIALS_PATH",
     "GEMINI_API_KEY",
