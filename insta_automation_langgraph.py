@@ -24,6 +24,8 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 SHEET_NAME = os.getenv("SHEET_NAME")
 INSTAGRAM_ACCOUNT_ID = os.getenv("INSTAGRAM_ACCOUNT_ID")
 INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")
+FACEBOOK_PAGE_ID = os.getenv("FACEBOOK_PAGE_ID")
+FACEBOOK_ACCESS_TOKEN = os.getenv("FACEBOOK_ACCESS_TOKEN")
 
 # Validate that all required environment variables are set
 required_vars = [
@@ -32,7 +34,9 @@ required_vars = [
     "SPREADSHEET_ID",
     "SHEET_NAME",
     "INSTAGRAM_ACCOUNT_ID",
-    "INSTAGRAM_ACCESS_TOKEN"
+    "INSTAGRAM_ACCESS_TOKEN",
+    "FACEBOOK_PAGE_ID",
+    "FACEBOOK_ACCESS_TOKEN"
 ]
 missing_vars = [var for var in required_vars if not os.getenv(var)]
 if missing_vars:
@@ -61,6 +65,7 @@ class WorkflowState(TypedDict):
     current_row_index: int
     caption: Optional[str]
     post_id: Optional[str]
+    facebook_post_id: Optional[str]
     error: Optional[str]
 
 # Node 1: Filter rows from Google Sheets
@@ -212,7 +217,55 @@ def create_instagram_post(state: WorkflowState) -> WorkflowState:
         return state
     finally:
         logger.info("Finished create_instagram_post node")
+
+# NEW NODE 3b: Create Facebook post (ADDED AFTER INSTAGRAM)
+def create_facebook_post(state: WorkflowState) -> WorkflowState:
+    logger.info(f"Starting create_facebook_post node for row index {state['current_row_index']}")
+    if state["error"]:
+        logger.warning(f"Skipping create_facebook_post due to existing error: {state['error']}")
+        return state
+    
+    if state["current_row_index"] >= len(state["rows"]):
+        logger.info("No more rows to process in create_facebook_post")
+        state["error"] = "No more rows to process"
+        return state
+    
+    try:
+        current_row = state["rows"][state["current_row_index"]]
+        image_url = current_row["image_url"]
+        caption = state["caption"]
+        logger.info(f"Attempting to post to Facebook: image_url={image_url}, caption={caption[:50]}...")
         
+        # Facebook Graph API endpoint for posting photos to profile
+        facebook_url = f"https://graph.facebook.com/v21.0/me/photos"
+        payload = {
+            "url": image_url,
+            "caption": caption,
+            "access_token": FACEBOOK_ACCESS_TOKEN  # Your User Token
+        }
+        
+        response = requests.post(facebook_url, data=payload, verify=True)
+        response.raise_for_status()
+        response_data = response.json()
+        
+        post_id = response_data.get("id")
+        if not post_id:
+            raise ValueError(f"Failed to create Facebook post: {response_data}")
+        
+        state["facebook_post_id"] = post_id
+        logger.info(f"Posted to Facebook for row {current_row['row_number']}: post_id={post_id}")
+        return state
+    except requests.exceptions.HTTPError as e:
+        state["error"] = f"Error creating Facebook post: {str(e)}. Response: {e.response.text}"
+        logger.error(state["error"])
+        return state
+    except Exception as e:
+        state["error"] = f"Error creating Facebook post: {str(e)}"
+        logger.error(state["error"])
+        return state
+    finally:
+        logger.info("Finished create_facebook_post node")
+
 # Node 4: Clear row in Google Sheets
 def clear_row(state: WorkflowState) -> WorkflowState:
     logger.info(f"Starting clear_row node for row index {state['current_row_index']}")
@@ -252,6 +305,7 @@ def clear_row(state: WorkflowState) -> WorkflowState:
         state["current_row_index"] += 1
         state["caption"] = None
         state["post_id"] = None
+        state["facebook_post_id"] = None
         state["error"] = None
         logger.info(f"Moving to next row index: {state['current_row_index']}")
         return state
@@ -295,13 +349,15 @@ workflow = StateGraph(WorkflowState)
 workflow.add_node("filter_rows", filter_rows)
 workflow.add_node("generate_caption", generate_caption)
 workflow.add_node("create_instagram_post", create_instagram_post)
+workflow.add_node("create_facebook_post", create_facebook_post)
 workflow.add_node("clear_row", clear_row)
 
 # Define edges
 workflow.set_entry_point("filter_rows")
 workflow.add_edge("filter_rows", "generate_caption")
 workflow.add_edge("generate_caption", "create_instagram_post")
-workflow.add_edge("create_instagram_post", "clear_row")
+workflow.add_edge("create_instagram_post", "create_facebook_post")
+workflow.add_edge("create_facebook_post", "clear_row")
 workflow.add_conditional_edges("clear_row", decide_next_step, {
     "generate_caption": "generate_caption",
     "clear_row": "clear_row",
@@ -317,7 +373,8 @@ def run_workflow():
         "rows": [],
         "current_row_index": 0,
         "caption": None,
-        "post_id": None,
+        "post_id": None,  # Instagram
+        "facebook_post_id": None,  # Facebook
         "error": None
     }
     # Increase recursion limit to handle large datasets
