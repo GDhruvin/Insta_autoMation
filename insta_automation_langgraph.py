@@ -377,10 +377,7 @@ def run_workflow():
         "facebook_post_id": None,  # Facebook
         "error": None
     }
-    # Increase recursion limit to handle large datasets
-    for event in graph.stream(initial_state, config={"recursion_limit": 100}):
-        # logger.info(f"Workflow state update: {event}")
-    logger.info("Workflow execution completed")
+
 
 if __name__ == "__main__":
     run_workflow()
