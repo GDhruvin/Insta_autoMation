@@ -253,6 +253,7 @@ def create_facebook_post(state: WorkflowState) -> WorkflowState:
             raise ValueError(f"Failed to create Facebook post: {response_data}")
         
         state["facebook_post_id"] = post_id
+        state["error"] = None
         logger.info(f"Posted to Facebook for row {current_row['row_number']}: post_id={post_id}")
         return state
     except requests.exceptions.HTTPError as e:
@@ -274,6 +275,7 @@ def clear_row(state: WorkflowState) -> WorkflowState:
         state["error"] = "No more rows to process"
         return state
     
+    clear_success = False
     try:
         current_row = state["rows"][state["current_row_index"]]
         row_number = current_row["row_number"]
@@ -300,42 +302,48 @@ def clear_row(state: WorkflowState) -> WorkflowState:
             raise Exception("Max retries exceeded for Google Sheets API call")
         
         logger.info(f"Cleared row {row_number}")
-        
-        # Move to next row
-        state["current_row_index"] += 1
-        state["caption"] = None
-        state["post_id"] = None
-        state["facebook_post_id"] = None
-        state["error"] = None
-        logger.info(f"Moving to next row index: {state['current_row_index']}")
-        return state
+        clear_success = True
     except HttpError as e:
         state["error"] = f"Error clearing row: {str(e)}"
         logger.error(state["error"])
-        return state
+        clear_success = False
     except Exception as e:
         state["error"] = f"Error clearing row: {str(e)}"
         logger.error(state["error"])
-        return state
-    except IndexError:
-        state["error"] = "No more rows to clear"
-        logger.error(state["error"])
-        return state
-    finally:
-        logger.info("Finished clear_row node")
+        clear_success = False
+    
+    # Always proceed to next row after attempting clear (since posts succeeded)
+    state["current_row_index"] += 1
+    state["caption"] = None
+    state["post_id"] = None
+    state["facebook_post_id"] = None
+    if not clear_success:
+        logger.warning(f"Failed to clear row {current_row['row_number']}, but proceeding to next row to avoid re-processing.")
+    state["error"] = None  # Clear any error to allow proceeding
+    logger.info(f"Moved to next row index: {state['current_row_index']}")
+    return state
+
+# Conditional edge after Instagram post
+def decide_after_instagram(state: WorkflowState) -> str:
+    if state.get("post_id") and not state.get("error"):
+        logger.info("Instagram post successful, proceeding to Facebook post")
+        return "create_facebook_post"
+    else:
+        logger.warning(f"Instagram post failed or error: {state.get('error')}, ending workflow for this row")
+        return END
+
+# Conditional edge after Facebook post
+def decide_after_facebook(state: WorkflowState) -> str:
+    if state.get("facebook_post_id") and not state.get("error"):
+        logger.info("Facebook post successful, proceeding to clear row")
+        return "clear_row"
+    else:
+        logger.warning(f"Facebook post failed or error: {state.get('error')}, ending workflow for this row")
+        return END
 
 # Conditional edge to handle errors or continue processing
 def decide_next_step(state: WorkflowState) -> str:
     logger.info("Starting decide_next_step")
-    if state["error"]:
-        logger.warning(f"Error detected: {state['error']}")
-        # Route to clear_row only if there are rows left to potentially clear/recover
-        if state["current_row_index"] < len(state["rows"]):
-            logger.info("Routing to clear_row to handle error")
-            return "clear_row"
-        else:
-            logger.info("No rows left, routing to END due to error")
-            return END
     if state["current_row_index"] >= len(state["rows"]):
         logger.info("No more rows to process, routing to END")
         return END
@@ -356,13 +364,30 @@ workflow.add_node("clear_row", clear_row)
 workflow.set_entry_point("filter_rows")
 workflow.add_edge("filter_rows", "generate_caption")
 workflow.add_edge("generate_caption", "create_instagram_post")
-workflow.add_edge("create_instagram_post", "create_facebook_post")
-workflow.add_edge("create_facebook_post", "clear_row")
-workflow.add_conditional_edges("clear_row", decide_next_step, {
-    "generate_caption": "generate_caption",
-    "clear_row": "clear_row",
-    END: END
-})
+workflow.add_conditional_edges(
+    "create_instagram_post",
+    decide_after_instagram,
+    {
+        "create_facebook_post": "create_facebook_post",
+        END: END
+    }
+)
+workflow.add_conditional_edges(
+    "create_facebook_post",
+    decide_after_facebook,
+    {
+        "clear_row": "clear_row",
+        END: END
+    }
+)
+workflow.add_conditional_edges(
+    "clear_row",
+    decide_next_step,
+    {
+        "generate_caption": "generate_caption",
+        END: END
+    }
+)
 
 # Compile and run the workflow
 graph = workflow.compile()
