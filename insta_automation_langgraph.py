@@ -157,7 +157,7 @@ def generate_caption(state: WorkflowState) -> WorkflowState:
     finally:
         logger.info("Finished generate_caption node")
 
-# Node 3: Create Instagram post
+# Node 3: Create Instagram post with retry logic
 def create_instagram_post(state: WorkflowState) -> WorkflowState:
     logger.info(f"Starting create_instagram_post node for row index {state['current_row_index']}")
     if state["error"]:
@@ -182,35 +182,46 @@ def create_instagram_post(state: WorkflowState) -> WorkflowState:
             "caption": caption,
             "access_token": INSTAGRAM_ACCESS_TOKEN
         }
-        response = requests.post(create_media_url, data=payload, verify=True)  # Enable SSL verification
-        response.raise_for_status()  # Raises an exception for 4xx/5xx errors
+        response = requests.post(create_media_url, data=payload, verify=True)
+        response.raise_for_status()
         response_data = response.json()
         media_id = response_data.get("id")
         if not media_id:
             raise ValueError(f"Failed to create media container: {response_data}")
         logger.info(f"Created media container for row {current_row['row_number']}: media_id={media_id}")
         
-        # Step 2: Publish the media
+        # Step 2: Publish the media with retries
         publish_url = f"https://graph.instagram.com/v21.0/{INSTAGRAM_ACCOUNT_ID}/media_publish"
         publish_payload = {
             "creation_id": media_id,
             "access_token": INSTAGRAM_ACCESS_TOKEN
         }
-        publish_response = requests.post(publish_url, data=publish_payload, verify=True)  # Enable SSL verification
-        publish_response.raise_for_status()
-        publish_data = publish_response.json()
-        post_id = publish_data.get("id")
-        if not post_id:
-            raise ValueError(f"Failed to publish media: {publish_data}")
         
-        state["post_id"] = post_id
-        state["error"] = None
-        logger.info(f"Posted to Instagram for row {current_row['row_number']}: post_id={post_id}")
-        return state
-    except requests.exceptions.HTTPError as e:
-        state["error"] = f"Error creating Instagram post: {str(e)}. Response: {e.response.text}"
-        logger.error(state["error"])
-        return state
+        max_retries = 5
+        for attempt in range(max_retries):
+            publish_response = requests.post(publish_url, data=publish_payload, verify=True)
+            if publish_response.status_code == 200:
+                publish_data = publish_response.json()
+                post_id = publish_data.get("id")
+                if post_id:
+                    state["post_id"] = post_id
+                    state["error"] = None
+                    logger.info(f"Posted to Instagram for row {current_row['row_number']}: post_id={post_id}")
+                    return state
+            else:
+                error_json = publish_response.json()
+                error_code = error_json.get("error", {}).get("code")
+                error_subcode = error_json.get("error", {}).get("error_subcode")
+                if error_code == 9007 and error_subcode == 2207027:
+                    wait_time = 2 ** attempt
+                    logger.warning(f"Media not ready (attempt {attempt+1}/{max_retries}), retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    publish_response.raise_for_status()
+        
+        raise Exception(f"Failed to publish media after {max_retries} attempts: {publish_response.text}")
+    
     except Exception as e:
         state["error"] = f"Error creating Instagram post: {str(e)}"
         logger.error(state["error"])
