@@ -229,7 +229,8 @@ def create_instagram_post(state: WorkflowState) -> WorkflowState:
     finally:
         logger.info("Finished create_instagram_post node")
 
-# NEW NODE 3b: Create Facebook post (ADDED AFTER INSTAGRAM)
+# Node 3b: Create Facebook post (COMMENTED OUT - SKIPPED)
+"""
 def create_facebook_post(state: WorkflowState) -> WorkflowState:
     logger.info(f"Starting create_facebook_post node for row index {state['current_row_index']}")
     if state["error"]:
@@ -277,6 +278,7 @@ def create_facebook_post(state: WorkflowState) -> WorkflowState:
         return state
     finally:
         logger.info("Finished create_facebook_post node")
+"""
 
 # Node 4: Clear row in Google Sheets
 def clear_row(state: WorkflowState) -> WorkflowState:
@@ -334,16 +336,17 @@ def clear_row(state: WorkflowState) -> WorkflowState:
     logger.info(f"Moved to next row index: {state['current_row_index']}")
     return state
 
-# Conditional edge after Instagram post
+# Conditional edge after Instagram post - MODIFIED: Go directly to clear_row
 def decide_after_instagram(state: WorkflowState) -> str:
     if state.get("post_id") and not state.get("error"):
-        logger.info("Instagram post successful, proceeding to Facebook post")
-        return "create_facebook_post"
+        logger.info("Instagram post successful, proceeding to clear row (Facebook skipped)")
+        return "clear_row"  # Skip Facebook, go directly to clear_row
     else:
         logger.warning(f"Instagram post failed or error: {state.get('error')}, ending workflow for this row")
         return END
 
-# Conditional edge after Facebook post
+# REMOVED: Conditional edge after Facebook post (no longer needed)
+"""
 def decide_after_facebook(state: WorkflowState) -> str:
     if state.get("facebook_post_id") and not state.get("error"):
         logger.info("Facebook post successful, proceeding to clear row")
@@ -351,6 +354,7 @@ def decide_after_facebook(state: WorkflowState) -> str:
     else:
         logger.warning(f"Facebook post failed or error: {state.get('error')}, ending workflow for this row")
         return END
+"""
 
 # Conditional edge to handle errors or continue processing
 def decide_next_step(state: WorkflowState) -> str:
@@ -368,21 +372,23 @@ workflow = StateGraph(WorkflowState)
 workflow.add_node("filter_rows", filter_rows)
 workflow.add_node("generate_caption", generate_caption)
 workflow.add_node("create_instagram_post", create_instagram_post)
-workflow.add_node("create_facebook_post", create_facebook_post)
+# workflow.add_node("create_facebook_post", create_facebook_post)  # Facebook node removed
 workflow.add_node("clear_row", clear_row)
 
-# Define edges
+# Define edges - MODIFIED to skip Facebook
 workflow.set_entry_point("filter_rows")
 workflow.add_edge("filter_rows", "generate_caption")
 workflow.add_edge("generate_caption", "create_instagram_post")
 workflow.add_conditional_edges(
     "create_instagram_post",
-    decide_after_instagram,
+    decide_after_instagram,  # Now goes directly to clear_row or END
     {
-        "create_facebook_post": "create_facebook_post",
-        END: END
+        "clear_row": "clear_row",  # Instagram success → clear_row
+        END: END  # Instagram failure → END
     }
 )
+# REMOVED: Facebook conditional edges
+"""
 workflow.add_conditional_edges(
     "create_facebook_post",
     decide_after_facebook,
@@ -391,6 +397,7 @@ workflow.add_conditional_edges(
         END: END
     }
 )
+"""
 workflow.add_conditional_edges(
     "clear_row",
     decide_next_step,
@@ -404,7 +411,7 @@ workflow.add_conditional_edges(
 graph = workflow.compile()
 
 def run_workflow():
-    logger.info("Starting workflow execution")
+    logger.info("Starting workflow execution (Instagram only - Facebook skipped)")
     initial_state = {
         "rows": [],
         "current_row_index": 0,
