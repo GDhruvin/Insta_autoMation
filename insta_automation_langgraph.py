@@ -367,14 +367,60 @@ def clear_row(state: WorkflowState) -> WorkflowState:
     logger.info(f"Moved to next row index: {state['current_row_index']}")
     return state
 
+# Node 4b: Skip failed row - delete it from sheet and move to next row
+def skip_row(state: WorkflowState) -> WorkflowState:
+    logger.info(f"Starting skip_row node for row index {state['current_row_index']}")
+    if state["current_row_index"] >= len(state["rows"]):
+        logger.info("No more rows in skip_row")
+        return state
+
+    current_row = state["rows"][state["current_row_index"]]
+    row_number = current_row["row_number"]
+    upload_error = state.get("error", "Unknown error")
+    logger.warning(
+        f"Skipping and deleting row {row_number} due to upload failure: {upload_error}"
+    )
+
+    try:
+        service = get_sheets_service()
+        range_name = f"{SHEET_NAME}!A{row_number}:DZ{row_number}"
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                service.spreadsheets().values().clear(
+                    spreadsheetId=SPREADSHEET_ID,
+                    range=range_name
+                ).execute()
+                logger.info(f"Deleted (cleared) failed row {row_number} from sheet")
+                break
+            except HttpError as e:
+                if e.resp.status in [429, 500, 503]:
+                    logger.warning(f"Retry attempt {attempt + 1}/{max_retries} after error: {str(e)}")
+                    time.sleep(2 ** attempt)
+                else:
+                    raise
+        else:
+            logger.error(f"Max retries exceeded while clearing failed row {row_number}")
+    except Exception as e:
+        logger.error(f"Failed to clear failed row {row_number}: {str(e)}")
+
+    # Advance to next row regardless
+    state["current_row_index"] += 1
+    state["caption"] = None
+    state["post_id"] = None
+    state["facebook_post_id"] = None
+    state["error"] = None
+    logger.info(f"Skipped row {row_number}, moved to next row index: {state['current_row_index']}")
+    return state
+
 # Conditional edge after Instagram post - MODIFIED: Go directly to clear_row
 def decide_after_instagram(state: WorkflowState) -> str:
     if state.get("post_id") and not state.get("error"):
         logger.info("Instagram post successful, proceeding to clear row (Facebook skipped)")
         return "clear_row"  # Skip Facebook, go directly to clear_row
     else:
-        logger.warning(f"Instagram post failed or error: {state.get('error')}, ending workflow for this row")
-        return END
+        logger.warning(f"Instagram post failed or error: {state.get('error')}, skipping this row")
+        return "skip_row"
 
 # REMOVED: Conditional edge after Facebook post (no longer needed)
 """
@@ -405,6 +451,7 @@ workflow.add_node("generate_caption", generate_caption)
 workflow.add_node("create_instagram_post", create_instagram_post)
 # workflow.add_node("create_facebook_post", create_facebook_post)  # Facebook node removed
 workflow.add_node("clear_row", clear_row)
+workflow.add_node("skip_row", skip_row)
 
 # Define edges - MODIFIED to skip Facebook
 workflow.set_entry_point("filter_rows")
@@ -412,10 +459,10 @@ workflow.add_edge("filter_rows", "generate_caption")
 workflow.add_edge("generate_caption", "create_instagram_post")
 workflow.add_conditional_edges(
     "create_instagram_post",
-    decide_after_instagram,  # Now goes directly to clear_row or END
+    decide_after_instagram,
     {
-        "clear_row": "clear_row",  # Instagram success → clear_row
-        END: END  # Instagram failure → END
+        "clear_row": "clear_row",  # Instagram success → clear row and continue
+        "skip_row": "skip_row"    # Instagram failure → skip/delete row and continue
     }
 )
 # REMOVED: Facebook conditional edges
@@ -431,6 +478,14 @@ workflow.add_conditional_edges(
 """
 workflow.add_conditional_edges(
     "clear_row",
+    decide_next_step,
+    {
+        "generate_caption": "generate_caption",
+        END: END
+    }
+)
+workflow.add_conditional_edges(
+    "skip_row",
     decide_next_step,
     {
         "generate_caption": "generate_caption",
